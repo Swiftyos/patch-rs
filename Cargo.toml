@@ -7,7 +7,7 @@ repository = "https://github.com/uniphil/patch-rs"
 readme = "README.md"
 keywords = ["patch", "diff", "parse", "nom"]
 license = "MIT"
-edition = "2018"
+edition = "2024"
 
 [dependencies]
 nom = "8.0.0"
