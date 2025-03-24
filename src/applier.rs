@@ -23,7 +23,12 @@ pub enum ApplyError {
         actual: String,
     },
     /// The expected block of lines was not found in the input text
-    HunkNotFound,
+    HunkNotFound {
+        /// The expected block of lines
+        expected: String,
+        /// The actual block of lines
+        file_contents: String,
+    },
 }
 
 impl fmt::Display for ApplyError {
@@ -47,8 +52,12 @@ impl fmt::Display for ApplyError {
                     line, expected, actual
                 )
             }
-            ApplyError::HunkNotFound => {
-                write!(f, "Hunk not found")
+            ApplyError::HunkNotFound { expected, file_contents } => {
+                write!(
+                    f,
+                    "Hunk not found: expected to find '{}', file has '{}'",
+                    expected, file_contents
+                )
             }
         }
     }
@@ -216,6 +225,12 @@ pub fn find_replace_apply(patch: &Patch, content: &str) -> Result<String, ApplyE
         let target_index = hunk.old_range.start;
 
         for i in 0..=content_lines.len().saturating_sub(old_lines.len()) {
+            // Skip if there aren't enough lines left to match the pattern
+            if i + old_lines.len() > content_lines.len() {
+                
+                continue;
+            }
+            
             if content_lines[i..i + old_lines.len()] == old_lines[..] {
                 let distance = if i >= target_index as usize {
                     i - target_index as usize
@@ -234,7 +249,10 @@ pub fn find_replace_apply(patch: &Patch, content: &str) -> Result<String, ApplyE
             content_lines.splice(index..index + old_lines.len(), new_lines.iter().cloned());
         } else {
             // If the expected block is not found, return an error.
-            return Err(ApplyError::HunkNotFound);
+            return Err(ApplyError::HunkNotFound {
+                expected: old_lines.join("\n"),
+                file_contents: content_lines.join("\n"),
+            });
         }
     }
 
@@ -344,7 +362,13 @@ mod tests {
 
         let result = find_replace_apply(&patch, content);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), ApplyError::HunkNotFound));
+        assert!(matches!(
+            result.unwrap_err(),
+            ApplyError::HunkNotFound {
+                expected: expected,
+                file_contents: file_contents,
+            }
+        ));
     }
 
     // Test 4: Applying a hunk that includes context lines.
