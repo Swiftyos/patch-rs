@@ -1,8 +1,7 @@
-use nom::Err;
 use std::fmt;
-use std::{error::Error, ops::Index};
+use std::error::Error;
 
-use crate::ast::{Hunk, Line, Patch, Range};
+use crate::ast::{Line, Patch};
 
 /// Error that can occur while applying a patch
 #[derive(Debug)]
@@ -171,7 +170,20 @@ pub fn apply(patch: &Patch, content: &str) -> Result<String, ApplyError> {
     Ok(output)
 }
 
-fn find_replace_apply(patch: &Patch, content: &str) -> Result<String, ApplyError> {
+/// Applies a patch to content using a find-and-replace strategy.
+///
+/// Unlike the standard `apply` function, this method doesn't rely on exact line numbers.
+/// Instead, it searches for blocks of context and removed lines that match the patch,
+/// and replaces them with the corresponding new lines.
+///
+/// # Arguments
+/// * `patch` - The patch to apply
+/// * `content` - The content to apply the patch to
+///
+/// # Returns
+/// * `Ok(String)` - The patched content
+/// * `Err(ApplyError)` - If the patch couldn't be applied
+pub fn find_replace_apply(patch: &Patch, content: &str) -> Result<String, ApplyError> {
     // Split the content into lines.
     let mut content_lines: Vec<&str> = content.lines().collect();
 
