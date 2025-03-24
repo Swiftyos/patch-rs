@@ -45,10 +45,10 @@
 
 #![deny(unused_must_use)]
 
-mod ast;
 mod applier;
+mod ast;
 mod parser;
 
+pub use applier::{ApplyError, apply};
 pub use ast::*;
 pub use parser::ParseError;
-pub use applier::{apply, ApplyError};

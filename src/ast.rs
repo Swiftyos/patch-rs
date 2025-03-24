@@ -3,7 +3,7 @@ use std::fmt;
 
 use chrono::{DateTime, FixedOffset};
 
-use crate::parser::{parse_multiple_patches, parse_single_patch, ParseError};
+use crate::parser::{ParseError, parse_multiple_patches, parse_single_patch};
 
 /// A complete patch summarizing the differences between two files
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -226,11 +226,7 @@ impl Hunk<'_> {
     /// A nicer way to access the optional hint
     pub fn hint(&self) -> Option<&str> {
         let h = self.range_hint.trim_start();
-        if h.is_empty() {
-            None
-        } else {
-            Some(h)
-        }
+        if h.is_empty() { None } else { Some(h) }
     }
 }
 
