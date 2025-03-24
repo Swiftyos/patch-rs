@@ -1,7 +1,8 @@
-use std::error::Error;
+use nom::Err;
 use std::fmt;
+use std::{error::Error, ops::Index};
 
-use crate::ast::{Line, Patch};
+use crate::ast::{Hunk, Line, Patch, Range};
 
 /// Error that can occur while applying a patch
 #[derive(Debug)]
@@ -22,6 +23,8 @@ pub enum ApplyError {
         /// The actual line from the input text
         actual: String,
     },
+    /// The expected block of lines was not found in the input text
+    HunkNotFound,
 }
 
 impl fmt::Display for ApplyError {
@@ -44,6 +47,9 @@ impl fmt::Display for ApplyError {
                     "Context mismatch at line {}: expected '{}', got '{}'",
                     line, expected, actual
                 )
+            }
+            ApplyError::HunkNotFound => {
+                write!(f, "Hunk not found")
             }
         }
     }
@@ -89,7 +95,13 @@ pub fn apply(patch: &Patch, content: &str) -> Result<String, ApplyError> {
 
     for hunk in &patch.hunks {
         // Add unchanged lines before the hunk
-        while current_line < (hunk.old_range.start - 1) as usize {
+        let start = if hunk.old_range.start > 0 {
+            hunk.old_range.start - 1
+        } else {
+            0
+        };
+
+        while current_line < start as usize {
             if current_line >= lines.len() {
                 return Err(ApplyError::LineOutOfBounds {
                     line: current_line as u64 + 1,
@@ -159,10 +171,203 @@ pub fn apply(patch: &Patch, content: &str) -> Result<String, ApplyError> {
     Ok(output)
 }
 
+fn find_replace_apply(patch: &Patch, content: &str) -> Result<String, ApplyError> {
+    // Split the content into lines.
+    let mut content_lines: Vec<&str> = content.lines().collect();
+
+    // Process each hunk in the patch.
+    for hunk in &patch.hunks {
+        // Gather the "old" lines: context and removed lines.
+        let old_lines: Vec<&str> = hunk
+            .lines
+            .iter()
+            .filter_map(|line| match line {
+                Line::Context(text) | Line::Remove(text) => Some(*text),
+                _ => None,
+            })
+            .collect();
+
+        // Gather the "new" lines: context and added lines.
+        let new_lines: Vec<&str> = hunk
+            .lines
+            .iter()
+            .filter_map(|line| match line {
+                Line::Context(text) | Line::Add(text) => Some(*text),
+                _ => None,
+            })
+            .collect();
+
+        // Find the occurrence of old_lines in content_lines that is closest to hunk.old_range.start.
+        let mut best_index: Option<usize> = None;
+        let mut best_distance: Option<usize> = None;
+        // Here we assume hunk.old_range.start is a 0-indexed line number.
+        let target_index = hunk.old_range.start;
+
+        for i in 0..=content_lines.len().saturating_sub(old_lines.len()) {
+            if content_lines[i..i + old_lines.len()] == old_lines[..] {
+                let distance = if i >= target_index as usize {
+                    i - target_index as usize
+                } else {
+                    target_index as usize - i
+                };
+                if best_distance.is_none() || distance < best_distance.unwrap() {
+                    best_distance = Some(distance);
+                    best_index = Some(i);
+                }
+            }
+        }
+
+        // If we found an occurrence, replace that block of lines.
+        if let Some(index) = best_index {
+            content_lines.splice(index..index + old_lines.len(), new_lines.iter().cloned());
+        } else {
+            // If the expected block is not found, return an error.
+            return Err(ApplyError::HunkNotFound);
+        }
+    }
+
+    // Join the updated lines into a single string.
+    let new_content = content_lines.join("\n");
+    Ok(new_content)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Patch;
+    use crate::{File, Hunk, Line, Patch, Range};
+    use std::borrow::Cow;
+    // Test 1: A simple replacement of a single line.
+    #[test]
+    fn test_simple_replace() {
+        let content = "line1\nline2\nline3";
+        let patch = Patch {
+            old: File {
+                path: Cow::Borrowed(""),
+                meta: None,
+            },
+            new: File {
+                path: Cow::Borrowed(""),
+                meta: None,
+            },
+            end_newline: true,
+            hunks: vec![Hunk {
+                old_range: Range { start: 1, count: 1 },
+                new_range: Range { start: 1, count: 1 },
+                range_hint: "",
+                lines: vec![
+                    // In the patch, we expect to remove "line2" and replace it.
+                    Line::Remove("line2"),
+                    Line::Add("line2 modified"),
+                ],
+            }],
+        };
+
+        let result = find_replace_apply(&patch, content);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "line1\nline2 modified\nline3".to_string());
+    }
+
+    // Test 2: When the content contains multiple occurrences of the target block,
+    // the hunk should be applied to the occurrence closest to the specified starting index.
+    #[test]
+    fn test_multiple_occurrences_choose_closest() {
+        let content = "line1\nline2\nline3\nline2\nline3";
+        let patch = Patch {
+            old: File {
+                path: Cow::Borrowed(""),
+                meta: None,
+            },
+            new: File {
+                path: Cow::Borrowed(""),
+                meta: None,
+            },
+            end_newline: true,
+            hunks: vec![Hunk {
+                // The target index is 1.
+                old_range: Range { start: 1, count: 2 },
+                new_range: Range { start: 1, count: 2 },
+                range_hint: "",
+                lines: vec![
+                    // Old lines to match: "line2" followed by "line3"
+                    Line::Remove("line2"),
+                    Line::Remove("line3"),
+                    // New lines to replace with.
+                    Line::Add("new2"),
+                    Line::Add("new3"),
+                ],
+            }],
+        };
+
+        let result = find_replace_apply(&patch, content);
+        assert!(result.is_ok());
+        let expected = "line1\nnew2\nnew3\nline2\nline3".to_string();
+        assert_eq!(result.unwrap(), expected);
+    }
+
+    // Test 3: When no matching block is found, the function should return an error.
+    #[test]
+    fn test_hunk_not_found_error() {
+        let content = "line1\nline2\nline3";
+        let patch = Patch {
+            old: File {
+                path: Cow::Borrowed(""),
+                meta: None,
+            },
+            new: File {
+                path: Cow::Borrowed(""),
+                meta: None,
+            },
+            end_newline: true,
+            hunks: vec![Hunk {
+                old_range: Range { start: 1, count: 1 },
+                new_range: Range { start: 1, count: 1 },
+                range_hint: "",
+                lines: vec![
+                    // This hunk expects a block that doesn't exist in the content.
+                    Line::Remove("lineX"),
+                    Line::Add("lineX modified"),
+                ],
+            }],
+        };
+
+        let result = find_replace_apply(&patch, content);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ApplyError::HunkNotFound));
+    }
+
+    // Test 4: Applying a hunk that includes context lines.
+    #[test]
+    fn test_context_lines() {
+        let content = "line1\nline2\nline3\nline4";
+        let patch = Patch {
+            old: File {
+                path: Cow::Borrowed(""),
+                meta: None,
+            },
+            new: File {
+                path: Cow::Borrowed(""),
+                meta: None,
+            },
+            end_newline: true,
+            hunks: vec![Hunk {
+                old_range: Range { start: 1, count: 2 },
+                new_range: Range { start: 1, count: 2 },
+                range_hint: "",
+                lines: vec![
+                    // The context line ("line2") should appear in both old and new lines.
+                    Line::Context("line2"),
+                    // "line3" is to be removed and replaced.
+                    Line::Remove("line3"),
+                    Line::Add("line3 modified"),
+                ],
+            }],
+        };
+
+        let result = find_replace_apply(&patch, content);
+        assert!(result.is_ok());
+        let expected = "line1\nline2\nline3 modified\nline4".to_string();
+        assert_eq!(result.unwrap(), expected);
+    }
 
     #[test]
     fn test_apply_simple_patch() {
@@ -216,7 +421,6 @@ mod tests {
         assert_eq!(result, "A\nD\n");
     }
 
-
     #[test]
     fn test_apply_patch_line_out_of_bounds() {
         let content = "A\nB\n";
@@ -232,10 +436,7 @@ mod tests {
         let patch = Patch::from_single(patch_text).unwrap();
         let err = apply(&patch, content).unwrap_err();
         match err {
-            ApplyError::LineOutOfBounds {
-                line,
-                total_lines,
-            } => {
+            ApplyError::LineOutOfBounds { line, total_lines } => {
                 assert_eq!(line, 3);
                 assert_eq!(total_lines, 2);
             }
@@ -270,4 +471,4 @@ mod tests {
             _ => panic!("Expected ContextMismatch error"),
         }
     }
-} 
+}
